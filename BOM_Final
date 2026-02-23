@@ -1,1 +1,285 @@
 
+
+Private Sub btnBOM_Click()
+    On Error GoTo ErrorHandler
+    
+    lblEstado.Caption = "Generando BOM en Excel (.xlsx)..."
+    DoEvents
+    
+    Const carpetaPath As String = "C:\Users\User\OneDrive - Dinamo Ingenieria SpA\Documents\Soporte Richard\Muelle Ensamble\"
+    
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    
+    If Not fso.FolderExists(carpetaPath) Then
+        MsgBox "La carpeta no existe:" & vbCrLf & carpetaPath, vbCritical
+        lblEstado.Caption = "Carpeta no encontrada"
+        Exit Sub
+    End If
+    
+    Dim texto As String
+    texto = GenerarBOMSimple(carpetaPath)
+    
+    If Left(texto, 6) = "ERROR:" Then
+        MsgBox texto, vbCritical, "Error al generar BOM"
+        lblEstado.Caption = "Fallo al generar BOM"
+        Exit Sub
+    End If
+    
+    ' Crear Excel
+    Dim xlApp As Object
+    Set xlApp = CreateObject("Excel.Application")
+    xlApp.Visible = False
+    
+    Dim wb As Object
+    Set wb = xlApp.Workbooks.Add
+    
+    Dim ws As Object
+    Set ws = wb.Sheets(1)
+    ws.Name = "BOM Muelle"
+    
+    ' Encabezado
+    ws.Cells(1, 1).Value = "BOM - Muelle Ensamble"
+    ws.Cells(1, 1).Font.Bold = True
+    ws.Cells(1, 1).Font.Size = 14
+    
+    ws.Cells(2, 1).Value = "Generado: " & Format(Now, "yyyy-mm-dd hh:nn:ss")
+    ws.Cells(2, 1).Font.Italic = True
+    
+    ' Encabezados de tabla (3 columnas)
+    ws.Cells(4, 1).Value = "Item"
+    ws.Cells(4, 2).Value = "Cantidad"
+    ws.Cells(4, 3).Value = "Unidad"
+    
+    Dim rngHeader As Object
+    Set rngHeader = ws.Range("A4:C4")
+    rngHeader.Font.Bold = True
+    rngHeader.Interior.Color = RGB(200, 200, 200)
+    rngHeader.HorizontalAlignment = -4108  ' Centrado
+    
+    ' Parseo y llenado de datos
+    Dim lineas As Variant
+    lineas = Split(texto, vbCrLf)
+    
+    Dim fila As Long: fila = 5
+    
+    Dim i As Long
+    For i = LBound(lineas) To UBound(lineas)
+        Dim linea As String: linea = Trim(lineas(i))
+        If linea = "" Then GoTo SiguienteLinea
+        
+        ' Ignorar líneas de encabezado general
+        If Left(linea, 5) = "sep=;" Or Left(linea, 4) = "BOM " Or Left(linea, 9) = "Generado:" _
+           Or Left(linea, 7) = "Total e" Then GoTo SiguienteLinea
+        
+        ' Fila título del ensamble
+        If Left(linea, 3) = "## " Then
+            Dim ensambleActual As String
+            ensambleActual = mid(linea, 4)
+            ws.Cells(fila, 1).Value = ensambleActual
+            ws.Cells(fila, 1).Font.Bold = True
+            ws.Cells(fila, 1).Font.Size = 12
+            ws.Cells(fila, 1).Interior.Color = RGB(220, 230, 241)  ' Azul claro
+            ws.Cells(fila, 1).HorizontalAlignment = -4108  ' Centrado
+            fila = fila + 1
+            GoTo SiguienteLinea
+        End If
+        
+        ' Líneas de datos (Item;Cantidad;Unidad)
+        If InStr(linea, ";") > 0 Then
+            Dim partes As Variant
+            partes = Split(linea, ";")
+            If UBound(partes) >= 2 Then
+                ws.Cells(fila, 1).Value = Trim(partes(0))          ' Item
+                ws.Cells(fila, 2).Value = Val(Trim(partes(1)))     ' Cantidad
+                ws.Cells(fila, 3).Value = Trim(partes(2))          ' Unidad
+                ws.Cells(fila, 2).HorizontalAlignment = -4152      ' Cantidad a la derecha
+                fila = fila + 1
+            End If
+        End If
+        
+SiguienteLinea:
+    Next i
+    
+    ' Formato final
+    ws.Columns("A:C").AutoFit
+    If fila > 5 Then
+        ws.Range("A5:C" & fila - 1).Borders.LineStyle = 1
+        ws.Range("B5:B" & fila - 1).HorizontalAlignment = -4152  ' Derecha para cantidades
+    End If
+    
+    ' Guardar como .xlsx
+    Dim ruta As String
+    ruta = Environ$("USERPROFILE") & "\Desktop\BOM_MuelleEnsamble_" & _
+           Format(Now, "yyyy-mm-dd_hh-mm-ss") & ".xlsx"
+    
+    wb.SaveAs fileName:=ruta, FileFormat:=51
+    
+    wb.Close SaveChanges:=False
+    xlApp.Quit
+    
+    lblEstado.Caption = "BOM exportado en .xlsx"
+    MsgBox "Archivo Excel generado exitosamente:" & vbCrLf & vbCrLf & ruta, vbInformation, "BOM Carpeta"
+    
+    Exit Sub
+    
+ErrorHandler:
+    MsgBox "Ocurrió un error:" & vbCrLf & Err.Number & " - " & Err.Description, vbCritical
+    If Not wb Is Nothing Then wb.Close False
+    If Not xlApp Is Nothing Then xlApp.Quit
+End Sub
+
+
+Private Function GenerarBOMSimple(ByVal carpetaPath As String) As String
+    On Error GoTo ErrorHandler
+    
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    
+    If Not fso.FolderExists(carpetaPath) Then
+        GenerarBOMSimple = "ERROR: La carpeta no existe ? " & carpetaPath
+        Exit Function
+    End If
+    
+    Dim txt As String
+    txt = "sep=;" & vbCrLf & _
+          "BOM Muelle Ensamble" & vbCrLf & _
+          "Generado: " & Format(Now, "yyyy-mm-dd hh:nn:ss") & vbCrLf & vbCrLf
+    
+    Dim carpeta As Object
+    Set carpeta = fso.GetFolder(carpetaPath)
+    
+    Dim arch As Object
+    Dim ensamblesProcesados As Long: ensamblesProcesados = 0
+    
+    For Each arch In carpeta.Files
+        If LCase(fso.GetExtensionName(arch.Name)) <> "iam" Then GoTo SiguienteArchivo
+        
+        ensamblesProcesados = ensamblesProcesados + 1
+        
+        Dim docAsm As AssemblyDocument
+        Dim abiertoPorMi As Boolean: abiertoPorMi = False
+        
+        Dim d As Document
+        For Each d In ThisApplication.Documents
+            If StrComp(d.FullFileName, arch.Path, vbTextCompare) = 0 Then
+                If d.DocumentType = kAssemblyDocumentObject Then
+                    Set docAsm = d
+                End If
+                Exit For
+            End If
+        Next
+        
+        If docAsm Is Nothing Then
+            On Error Resume Next
+            Dim opts As NameValueMap
+            Set opts = ThisApplication.TransientObjects.CreateNameValueMap
+            Set docAsm = ThisApplication.Documents.OpenWithOptions(arch.Path, opts, False)
+            If Err.Number <> 0 Then
+                txt = txt & "## ERROR al abrir: " & arch.Name & " ? " & Err.Description & vbCrLf & vbCrLf
+                Err.Clear
+                On Error GoTo ErrorHandler
+                GoTo SiguienteArchivo
+            End If
+            On Error GoTo ErrorHandler
+            abiertoPorMi = True
+        End If
+        
+        Dim asmDef As AssemblyComponentDefinition
+        Set asmDef = docAsm.ComponentDefinition
+        
+        Dim nCubo As Long, nPerfilC As Long, nGrating2 As Long
+        Dim nBA900 As Long, nBA1000 As Long
+        nCubo = 0: nPerfilC = 0: nGrating2 = 0: nBA900 = 0: nBA1000 = 0
+        
+        ContarComponentesRecursivo asmDef, nCubo, nPerfilC, nGrating2, nBA900, nBA1000
+        
+        txt = txt & "## " & fso.GetBaseName(arch.Name) & vbCrLf & _
+                    "Item;Cantidad;Unidad" & vbCrLf
+        
+        Dim hayAlgo As Boolean: hayAlgo = False
+        
+        If nCubo > 0 Then txt = txt & "CUBO;" & nCubo & ";unidades" & vbCrLf: hayAlgo = True
+        If nPerfilC > 0 Then txt = txt & "PerfilC;" & nPerfilC & ";unidades" & vbCrLf: hayAlgo = True
+        If nGrating2 > 0 Then txt = txt & "Grating2;" & nGrating2 & ";unidades" & vbCrLf: hayAlgo = True
+        If nBA900 > 0 Then txt = txt & "BA_900;" & nBA900 & ";unidades" & vbCrLf: hayAlgo = True
+        If nBA1000 > 0 Then txt = txt & "BA_1000;" & nBA1000 & ";unidades" & vbCrLf: hayAlgo = True
+        
+        If Not hayAlgo Then txt = txt & "(sin componentes reconocidos)" & vbCrLf
+        
+        txt = txt & vbCrLf
+        
+        If abiertoPorMi Then
+            On Error Resume Next
+            docAsm.Close False
+            If Err.Number <> 0 Then
+                txt = txt & "Advertencia: No se pudo cerrar " & arch.Name & " ? " & Err.Description & vbCrLf
+                Err.Clear
+            End If
+            On Error GoTo ErrorHandler
+        End If
+        
+SiguienteArchivo:
+    Next arch
+    
+    If ensamblesProcesados = 0 Then
+        txt = txt & "(No se encontraron archivos .iam en la carpeta)" & vbCrLf
+    Else
+        txt = txt & "Total ensambles: " & ensamblesProcesados & vbCrLf
+    End If
+    
+    GenerarBOMSimple = txt
+    Exit Function
+
+ErrorHandler:
+    GenerarBOMSimple = "ERROR GENERAL: " & Err.Description & " (Nº " & Err.Number & ")"
+End Function
+
+
+Private Sub ContarComponentesRecursivo(ByVal def As ComponentDefinition, _
+                                       ByRef nCubo As Long, ByRef nPerfilC As Long, _
+                                       ByRef nGrating2 As Long, ByRef nBA900 As Long, _
+                                       ByRef nBA1000 As Long)
+    If def Is Nothing Then Exit Sub
+    
+    Dim occ As ComponentOccurrence
+    For Each occ In def.Occurrences
+        Dim subDef As ComponentDefinition
+        On Error Resume Next
+        Set subDef = occ.Definition
+        If Err.Number <> 0 Then Err.Clear: GoTo SiguienteOcc
+        On Error GoTo 0
+        
+        Dim fileName As String
+        On Error Resume Next
+        fileName = LCase(subDef.Document.DisplayName)  ' ? Usamos DisplayName (solo nombre archivo)
+        If Err.Number <> 0 Or Len(fileName) = 0 Then Err.Clear: GoTo SiguienteOcc
+        On Error GoTo 0
+        
+        ' Quitar extensión para comparación limpia
+        Dim posExt As Long: posExt = InStrRev(fileName, ".")
+        If posExt > 0 Then fileName = Left(fileName, posExt - 1)
+        
+        If InStr(fileName, "cubo") > 0 Then nCubo = nCubo + 1
+        If InStr(fileName, "perfilc") > 0 Then nPerfilC = nPerfilC + 1
+        If InStr(fileName, "grating2") > 0 Then nGrating2 = nGrating2 + 1
+        
+        ' BA_900 y BA_1000 ? mucho más estricto para evitar falsos positivos
+        If (Left(fileName, 6) = "ba_900" Or InStr(fileName, "_ba_900") > 0) _
+           And InStr(fileName, "ba_1000") = 0 Then
+            nBA900 = nBA900 + 1
+            ' Descomenta para depurar:
+            ' Debug.Print "BA_900 contado ? " & fileName & "  (ensamble: " & def.Document.DisplayName & ")"
+        End If
+        
+        If Left(fileName, 7) = "ba_1000" Or InStr(fileName, "_ba_1000") > 0 Then
+            nBA1000 = nBA1000 + 1
+            ' Debug.Print "BA_1000 contado ? " & fileName
+        End If
+        
+SiguienteOcc:
+        If subDef.Type = kAssemblyComponentDefinitionObject Then
+            ContarComponentesRecursivo subDef, nCubo, nPerfilC, nGrating2, nBA900, nBA1000
+        End If
+    Next occ
+End Sub
