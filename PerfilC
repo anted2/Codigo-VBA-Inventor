@@ -1,0 +1,648 @@
+' ============================================================
+' iLogic (PerfilC.ipt) — Marco con 3 CASOS FINAL (versión corregida 2025)
+' 1. maskCells = "0" o vacío => Marco perimetral + michis internos (normal)
+' 2. maskCells con forma ANILLO cerrado:
+'    - ≤36 celdas activas  => Anillo pequeño: contornos + 4 diagonales
+'    - >36 celdas activas  => Anillo grande: contornos + michis en anillo
+' 3. Otras formas (C, T, U, L, I, etc.) => Solo contorno exterior, SIN michis
+' ============================================================
+
+Sub Main()
+    Dim doc As PartDocument = ThisDoc.Document
+    Dim compDef As PartComponentDefinition = doc.ComponentDefinition
+    Dim tg As TransientGeometry = ThisApplication.TransientGeometry
+    
+    Dim ancho_cm As Double = CDbl(Parameter("ancho"))
+    Dim largo_cm As Double = CDbl(Parameter("largo"))
+    Dim maskStr As String = CStr(Parameter("maskCells"))
+    
+    If ancho_cm <= 0 Or largo_cm <= 0 Then
+        MessageBox.Show("ancho/largo inválidos.", "Marco")
+        Exit Sub
+    End If
+    
+    ' LIMPIEZA TOTAL
+    For i As Integer = compDef.Features.SweepFeatures.Count To 1 Step -1
+        compDef.Features.SweepFeatures.Item(i).Delete()
+    Next
+    For i As Integer = compDef.Features.ExtrudeFeatures.Count To 1 Step -1
+        compDef.Features.ExtrudeFeatures.Item(i).Delete()
+    Next
+    For i As Integer = compDef.Sketches.Count To 1 Step -1
+        compDef.Sketches.Item(i).Delete()
+    Next
+    doc.Update()
+    
+    Dim paso_cm As Double = 50.0
+    Dim espaciamiento_cm As Double = 1.1
+    
+    ' DETERMINAR TIPO DE CASO
+    If String.IsNullOrWhiteSpace(maskStr) OrElse maskStr = "0" Then
+        ' CASO 1: RECTÁNGULO COMPLETO CON MICHIS INTERNOS
+        Dim cols As Integer = CInt(Math.Round(ancho_cm / paso_cm))
+        Dim filas As Integer = CInt(Math.Round(largo_cm / paso_cm))
+        
+        If cols <= 0 Or filas <= 0 Then
+            MessageBox.Show("No pude deducir cols/filas.", "Marco")
+            Exit Sub
+        End If
+        
+        Dim halfX As Double = ancho_cm / 2.0
+        Dim halfZ As Double = largo_cm / 2.0
+        
+        Dim skMarco As PlanarSketch = compDef.Sketches.Add(compDef.WorkPlanes.Item(2))
+        Dim lnMarco As SketchLine = DibujarRectangulo(skMarco, tg, -halfX, -halfZ, halfX, halfZ)
+        skMarco.Solve()
+        doc.Update()
+        
+        Dim i1 As Integer = CInt(Math.Round(cols / 3.0))
+        Dim i2 As Integer = cols - i1
+        Dim j1 As Integer = CInt(Math.Round(filas / 3.0))
+        Dim j2 As Integer = filas - j1
+        
+        Dim x1 As Double = -halfX + i1 * paso_cm
+        Dim x2 As Double = -halfX + i2 * paso_cm
+        Dim z1 As Double = -halfZ + j1 * paso_cm
+        Dim z2 As Double = -halfZ + j2 * paso_cm
+        
+        Dim v1 As SketchLine = CrearLineaEnSketch(compDef, tg, x1, -halfZ, x1, halfZ)
+        Dim v2 As SketchLine = CrearLineaEnSketch(compDef, tg, x2, -halfZ, x2, halfZ)
+        Dim h1 As SketchLine = CrearLineaEnSketch(compDef, tg, -halfX, z1, halfX, z1)
+        Dim h2 As SketchLine = CrearLineaEnSketch(compDef, tg, -halfX, z2, halfX, z2)
+        doc.Update()
+        
+        Dim skPerfilMarco As PlanarSketch = DibujarPerfilCMarco(compDef, tg, halfX + espaciamiento_cm, False)
+        Dim pathMarco As Path = compDef.Features.CreatePath(lnMarco)
+        RealizarBarrido(True, compDef, pathMarco, skPerfilMarco)
+        
+        If v1 IsNot Nothing Then SweepConPerfil(compDef, tg, v1, False)
+        If v2 IsNot Nothing Then SweepConPerfil(compDef, tg, v2, False)
+        If h1 IsNot Nothing Then SweepConPerfil(compDef, tg, h1, True)
+        If h2 IsNot Nothing Then SweepConPerfil(compDef, tg, h2, True)
+        
+        MessageBox.Show("¡Marco completo con michis internos!" & vbCrLf & "Celdas: " & cols & "x" & filas, "Éxito")
+    Else
+        ' CASOS CON MÁSCARA
+        Dim cols As Integer = CInt(Math.Round(ancho_cm / paso_cm))
+        Dim filas As Integer = CInt(Math.Round(largo_cm / paso_cm))
+        
+        If cols <= 0 Or filas <= 0 Then
+            MessageBox.Show("No pude deducir cols/filas.", "Marco")
+            Exit Sub
+        End If
+        
+        Dim mask(cols - 1, filas - 1) As Boolean
+        Dim pairs() As String = maskStr.Split(";"c)
+        Dim celdasActivas As Integer = 0
+        
+        For Each s As String In pairs
+            Dim t As String = s.Trim()
+            If t = "" Then Continue For
+            Dim ab() As String = t.Split(","c)
+            If ab.Length <> 2 Then Continue For
+            Dim ix As Integer = CInt(ab(0))
+            Dim iz As Integer = CInt(ab(1))
+            If ix >= 0 AndAlso ix < cols AndAlso iz >= 0 AndAlso iz < filas Then
+                mask(ix, iz) = True
+                celdasActivas += 1
+            End If
+        Next
+        
+        ' DETECCIÓN MEJORADA DE ANILLO
+        Dim borderesInteriores As Integer = 0
+        For ix As Integer = 0 To cols - 1
+            For iz As Integer = 0 To filas - 1
+                If mask(ix, iz) Then Continue For
+                If ExistsCell(mask, cols, filas, ix, iz + 1) Then borderesInteriores += 1
+                If ExistsCell(mask, cols, filas, ix, iz - 1) Then borderesInteriores += 1
+                If ExistsCell(mask, cols, filas, ix + 1, iz) Then borderesInteriores += 1
+                If ExistsCell(mask, cols, filas, ix - 1, iz) Then borderesInteriores += 1
+            Next
+        Next
+        
+        Dim tieneContornoInterior As Boolean = False
+        
+        Dim exInt As New List(Of Integer)()
+        Dim ezInt As New List(Of Integer)()
+        Dim exInt1 As New List(Of Integer)()
+        Dim ezInt1 As New List(Of Integer)()
+        
+        If borderesInteriores >= 20 Then   ' umbral más alto para evitar falsos anillos
+            For ix As Integer = 0 To cols - 1
+                For iz As Integer = 0 To filas - 1
+                    If mask(ix, iz) Then Continue For
+                    If ExistsCell(mask, cols, filas, ix, iz + 1) Then AddEdge(exInt, ezInt, exInt1, ezInt1, ix, iz + 1, ix + 1, iz + 1)
+                    If ExistsCell(mask, cols, filas, ix, iz - 1) Then AddEdge(exInt, ezInt, exInt1, ezInt1, ix, iz, ix + 1, iz)
+                    If ExistsCell(mask, cols, filas, ix + 1, iz) Then AddEdge(exInt, ezInt, exInt1, ezInt1, ix + 1, iz, ix + 1, iz + 1)
+                    If ExistsCell(mask, cols, filas, ix - 1, iz) Then AddEdge(exInt, ezInt, exInt1, ezInt1, ix, iz, ix, iz + 1)
+                Next
+            Next
+            
+            If exInt.Count >= 12 Then   ' mínimo segmentos para considerar hueco cerrado real
+                tieneContornoInterior = True
+            End If
+        End If
+        
+        ' Debug temporal - descomenta para ver por qué entra o no en anillo
+        ' MessageBox.Show("Celdas activas: " & celdasActivas & vbCrLf & _
+        '                 "Contactos interiores: " & borderesInteriores & vbCrLf & _
+        '                 "Segmentos interior detectados: " & exInt.Count & vbCrLf & _
+        '                 "Clasificado como: " & IIf(tieneContornoInterior, "ANILLO", "FORMA ABIERTA"), "Debug Clasificación")
+        
+        Dim exExt As New List(Of Integer)()
+        Dim ezExt As New List(Of Integer)()
+        Dim exExt1 As New List(Of Integer)()
+        Dim ezExt1 As New List(Of Integer)()
+        
+        For ix As Integer = 0 To cols - 1
+            For iz As Integer = 0 To filas - 1
+                If Not mask(ix, iz) Then Continue For
+                If Not ExistsCell(mask, cols, filas, ix, iz + 1) Then AddEdge(exExt, ezExt, exExt1, ezExt1, ix, iz + 1, ix + 1, iz + 1)
+                If Not ExistsCell(mask, cols, filas, ix, iz - 1) Then AddEdge(exExt, ezExt, exExt1, ezExt1, ix, iz, ix + 1, iz)
+                If Not ExistsCell(mask, cols, filas, ix + 1, iz) Then AddEdge(exExt, ezExt, exExt1, ezExt1, ix + 1, iz, ix + 1, iz + 1)
+                If Not ExistsCell(mask, cols, filas, ix - 1, iz) Then AddEdge(exExt, ezExt, exExt1, ezExt1, ix, iz, ix, iz + 1)
+            Next
+        Next
+        
+        If tieneContornoInterior Then
+            ' CASO 2: ANILLO
+            Dim esAnilloPequeno As Boolean = (celdasActivas <= 36)
+            
+            Dim halfX As Double = ancho_cm / 2.0
+            Dim halfZ As Double = largo_cm / 2.0
+            
+            Dim skExt As PlanarSketch = compDef.Sketches.Add(compDef.WorkPlanes.Item(2))
+            Dim lnExt As SketchLine = DibujarContorno(skExt, tg, exExt, ezExt, exExt1, ezExt1, paso_cm, halfX, halfZ)
+            skExt.Solve()
+            doc.Update()
+            
+            Dim skInt As PlanarSketch = compDef.Sketches.Add(compDef.WorkPlanes.Item(2))
+            Dim lnInt As SketchLine = DibujarContorno(skInt, tg, exInt, ezInt, exInt1, ezInt1, paso_cm, halfX, halfZ)
+            skInt.Solve()
+            doc.Update()
+            
+            Dim minExtX As Double, maxExtX As Double, minExtZ As Double, maxExtZ As Double
+            Dim minIntX As Double, maxIntX As Double, minIntZ As Double, maxIntZ As Double
+            
+            CalcularLimitesContorno(exExt, ezExt, exExt1, ezExt1, paso_cm, halfX, halfZ, minExtX, maxExtX, minExtZ, maxExtZ)
+            CalcularLimitesContorno(exInt, ezInt, exInt1, ezInt1, paso_cm, halfX, halfZ, minIntX, maxIntX, minIntZ, maxIntZ)
+            
+            If esAnilloPequeno Then
+                ' ANILLO PEQUEÑO: solo diagonales
+                Dim diag1 As SketchLine = CrearLineaEnSketch(compDef, tg, minExtX, minExtZ, minIntX, minIntZ)
+                Dim diag2 As SketchLine = CrearLineaEnSketch(compDef, tg, maxExtX, minExtZ, maxIntX, minIntZ)
+                Dim diag3 As SketchLine = CrearLineaEnSketch(compDef, tg, maxExtX, maxExtZ, maxIntX, maxIntZ)
+                Dim diag4 As SketchLine = CrearLineaEnSketch(compDef, tg, minExtX, maxExtZ, minIntX, maxIntZ)
+                doc.Update()
+                
+                Dim skPerfilExt As PlanarSketch = DibujarPerfilCMarco(compDef, tg, maxExtX + espaciamiento_cm, False)
+                Dim pathExt As Path = compDef.Features.CreatePath(lnExt)
+                RealizarBarrido(True, compDef, pathExt, skPerfilExt)
+                
+                Dim skPerfilInt As PlanarSketch = DibujarPerfilCMarco(compDef, tg, minIntX - espaciamiento_cm, False)
+                Dim pathInt As Path = compDef.Features.CreatePath(lnInt)
+                RealizarBarrido(True, compDef, pathInt, skPerfilInt)
+                
+                If diag1 IsNot Nothing Then SweepConPerfil(compDef, tg, diag1, False)
+                If diag2 IsNot Nothing Then SweepConPerfil(compDef, tg, diag2, False)
+                If diag3 IsNot Nothing Then SweepConPerfil(compDef, tg, diag3, False)
+                If diag4 IsNot Nothing Then SweepConPerfil(compDef, tg, diag4, False)
+                
+                MessageBox.Show("¡ANILLO PEQUEÑO generado!" & vbCrLf & "Celdas: " & celdasActivas, "Éxito")
+            Else
+                ' ANILLO GRANDE: michis en anillo
+                Dim i1 As Integer = CInt(Math.Round(cols / 3.0))
+                Dim i2 As Integer = cols - i1
+                Dim j1 As Integer = CInt(Math.Round(filas / 3.0))
+                Dim j2 As Integer = filas - j1
+                
+                Dim x1 As Double = -halfX + i1 * paso_cm
+                Dim x2 As Double = -halfX + i2 * paso_cm
+                Dim z1 As Double = -halfZ + j1 * paso_cm
+                Dim z2 As Double = -halfZ + j2 * paso_cm
+                
+                Dim v1_top As SketchLine = CrearLineaEnSketch(compDef, tg, x1, maxIntZ, x1, maxExtZ)
+                Dim v1_bot As SketchLine = CrearLineaEnSketch(compDef, tg, x1, minExtZ, x1, minIntZ)
+                Dim v2_top As SketchLine = CrearLineaEnSketch(compDef, tg, x2, maxIntZ, x2, maxExtZ)
+                Dim v2_bot As SketchLine = CrearLineaEnSketch(compDef, tg, x2, minExtZ, x2, minIntZ)
+                
+                Dim h1_left  As SketchLine = CrearLineaEnSketch(compDef, tg, minExtX, z1, minIntX, z1)
+                Dim h1_right As SketchLine = CrearLineaEnSketch(compDef, tg, maxIntX, z1, maxExtX, z1)
+                Dim h2_left  As SketchLine = CrearLineaEnSketch(compDef, tg, minExtX, z2, minIntX, z2)
+                Dim h2_right As SketchLine = CrearLineaEnSketch(compDef, tg, maxIntX, z2, maxExtX, z2)
+                doc.Update()
+                
+                Dim skPerfilExt As PlanarSketch = DibujarPerfilCMarco(compDef, tg, maxExtX + espaciamiento_cm, False)
+                Dim pathExt As Path = compDef.Features.CreatePath(lnExt)
+                RealizarBarrido(True, compDef, pathExt, skPerfilExt)
+                
+                Dim skPerfilInt As PlanarSketch = DibujarPerfilCMarco(compDef, tg, minIntX - espaciamiento_cm, False)
+                Dim pathInt As Path = compDef.Features.CreatePath(lnInt)
+                RealizarBarrido(True, compDef, pathInt, skPerfilInt)
+                
+                If v1_top  IsNot Nothing Then SweepConPerfil(compDef, tg, v1_top,  False)
+                If v1_bot  IsNot Nothing Then SweepConPerfil(compDef, tg, v1_bot,  False)
+                If v2_top  IsNot Nothing Then SweepConPerfil(compDef, tg, v2_top,  False)
+                If v2_bot  IsNot Nothing Then SweepConPerfil(compDef, tg, v2_bot,  False)
+                If h1_left IsNot Nothing Then SweepConPerfil(compDef, tg, h1_left, True)
+                If h1_right IsNot Nothing Then SweepConPerfil(compDef, tg, h1_right, True)
+                If h2_left IsNot Nothing Then SweepConPerfil(compDef, tg, h2_left, True)
+                If h2_right IsNot Nothing Then SweepConPerfil(compDef, tg, h2_right, True)
+                
+                MessageBox.Show("¡ANILLO GRANDE generado!" & vbCrLf & "Celdas: " & celdasActivas, "Éxito")
+            End If
+        Else
+            ' CASO 3: FORMA ABIERTA / IRREGULAR (C, T, U, L, I, etc.) → SOLO CONTORNO
+            Dim ex0 As New List(Of Integer)()
+            Dim ez0 As New List(Of Integer)()
+            Dim ex1 As New List(Of Integer)()
+            Dim ez1 As New List(Of Integer)()
+            
+            For ix As Integer = 0 To cols - 1
+                For iz As Integer = 0 To filas - 1
+                    If Not mask(ix, iz) Then Continue For
+                    If Not ExistsCell(mask, cols, filas, ix, iz + 1) Then AddEdge(ex0, ez0, ex1, ez1, ix, iz + 1, ix + 1, iz + 1)
+                    If Not ExistsCell(mask, cols, filas, ix, iz - 1) Then AddEdge(ex0, ez0, ex1, ez1, ix, iz, ix + 1, iz)
+                    If Not ExistsCell(mask, cols, filas, ix + 1, iz) Then AddEdge(ex0, ez0, ex1, ez1, ix + 1, iz, ix + 1, iz + 1)
+                    If Not ExistsCell(mask, cols, filas, ix - 1, iz) Then AddEdge(ex0, ez0, ex1, ez1, ix, iz, ix, iz + 1)
+                Next
+            Next
+            
+            If ex0.Count = 0 Then
+                MessageBox.Show("No se detectaron bordes exteriores.", "Error")
+                Exit Sub
+            End If
+            
+            ' Armar loop del contorno exterior
+            Dim used(ex0.Count - 1) As Boolean
+            Dim startE As Integer = 0
+            Dim bestZ As Integer = Integer.MaxValue
+            Dim bestX As Integer = Integer.MaxValue
+            
+            For e As Integer = 0 To ex0.Count - 1
+                Dim minx As Integer = Math.Min(ex0(e), ex1(e))
+                Dim minz As Integer = Math.Min(ez0(e), ez1(e))
+                If minz < bestZ Or (minz = bestZ And minx < bestX) Then
+                    bestZ = minz : bestX = minx : startE = e
+                End If
+            Next
+            
+            Dim loopPts As New List(Of Tuple(Of Integer, Integer))()
+            Dim sx As Integer = ex0(startE)
+            Dim sz As Integer = ez0(startE)
+            Dim cx As Integer = ex1(startE)
+            Dim cz As Integer = ez1(startE)
+            used(startE) = True
+            
+            loopPts.Add(Tuple.Create(sx, sz))
+            loopPts.Add(Tuple.Create(cx, cz))
+            
+            Dim safe As Integer = 0
+            Do
+                safe += 1
+                If safe > 200000 Then Exit Do
+                If cx = sx AndAlso cz = sz Then Exit Do
+                
+                Dim nextE As Integer = FindNextEdge(ex0, ez0, ex1, ez1, used, cx, cz)
+                If nextE < 0 Then
+                    MessageBox.Show("No pude cerrar el contorno exterior.", "Error")
+                    Exit Sub
+                End If
+                
+                used(nextE) = True
+                Dim nx As Integer, nz As Integer
+                If ex0(nextE) = cx AndAlso ez0(nextE) = cz Then
+                    nx = ex1(nextE) : nz = ez1(nextE)
+                Else
+                    nx = ex0(nextE) : nz = ez0(nextE)
+                End If
+                loopPts.Add(Tuple.Create(nx, nz))
+                cx = nx : cz = nz
+            Loop
+            
+            Dim halfX As Double = ancho_cm / 2.0
+            Dim halfZ As Double = largo_cm / 2.0
+            
+            Dim skPath As PlanarSketch = compDef.Sketches.Add(compDef.WorkPlanes.Item(2))
+            Dim prevLine As SketchLine = Nothing
+            Dim xCortePlus As Double = Double.PositiveInfinity
+            Dim xCorteMinus As Double = Double.NegativeInfinity
+            Dim tol As Double = 0.000001
+            
+            For i As Integer = 0 To loopPts.Count - 2
+                Dim a = loopPts(i)
+                Dim b = loopPts(i + 1)
+                
+                Dim pA_X As Double = (a.Item1 * paso_cm) - halfX
+                Dim pA_Z As Double = (a.Item2 * paso_cm) - halfZ
+                Dim pB_X As Double = (b.Item1 * paso_cm) - halfX
+                Dim pB_Z As Double = (b.Item2 * paso_cm) - halfZ
+                
+                Dim z1 As Double = pA_Z
+                Dim z2 As Double = pB_Z
+                
+                If (z1 <= 0 AndAlso z2 >= 0) OrElse (z1 >= 0 AndAlso z2 <= 0) Then
+                    If Math.Abs(z2 - z1) > tol Then
+                        Dim t As Double = (0 - z1) / (z2 - z1)
+                        If t >= -tol AndAlso t <= 1 + tol Then
+                            Dim xCorte As Double = pA_X + t * (pB_X - pA_X)
+                            If xCorte >= 0 Then
+                                If xCorte < xCortePlus Then xCortePlus = xCorte
+                            Else
+                                If xCorte > xCorteMinus Then xCorteMinus = xCorte
+                            End If
+                        End If
+                    ElseIf Math.Abs(z1) <= tol Then
+                        If pA_X >= 0 Then If pA_X < xCortePlus Then xCortePlus = pA_X Else If pA_X > xCorteMinus Then xCorteMinus = pA_X
+                        If pB_X >= 0 Then If pB_X < xCortePlus Then xCortePlus = pB_X Else If pB_X > xCorteMinus Then xCorteMinus = pB_X
+                    End If
+                End If
+                
+                Dim pA As Point2d = tg.CreatePoint2d(pA_X, pA_Z)
+                Dim pB As Point2d = tg.CreatePoint2d(pB_X, pB_Z)
+                
+                Dim ln As SketchLine
+                If i = 0 Then
+                    ln = skPath.SketchLines.AddByTwoPoints(pA, pB)
+                Else
+                    ln = skPath.SketchLines.AddByTwoPoints(prevLine.EndSketchPoint, pB)
+                End If
+                prevLine = ln
+            Next
+            
+            skPath.Solve()
+            doc.Update()
+            
+            Dim tienePlus As Boolean = Not Double.IsInfinity(xCortePlus)
+            Dim tieneMinus As Boolean = Not Double.IsInfinity(xCorteMinus)
+            Dim xElegido As Double
+            
+            If tienePlus AndAlso tieneMinus Then
+                xElegido = If(Math.Abs(xCortePlus) <= Math.Abs(xCorteMinus), xCortePlus, xCorteMinus)
+            ElseIf tienePlus Then
+                xElegido = xCortePlus
+            ElseIf tieneMinus Then
+                xElegido = xCorteMinus
+            Else
+                MessageBox.Show("El contorno no cruza Z=0 correctamente.", "Advertencia")
+                Exit Sub
+            End If
+            
+            Dim posicionPerfilX As Double = If(xElegido >= 0, -xElegido - espaciamiento_cm, -xElegido + espaciamiento_cm)
+            
+            DibujarPerfilCMask(compDef, tg, posicionPerfilX, True)
+            
+            Dim firstPathLine As SketchLine = Nothing
+            For Each ln As SketchLine In skPath.SketchLines
+                firstPathLine = Ln
+                Exit For
+            Next
+            
+            If firstPathLine Is Nothing Then
+                MessageBox.Show("No se encontró línea para el path.", "Error")
+                Exit Sub
+            End If
+            
+            Dim path As Path = compDef.Features.CreatePath(firstPathLine)
+            RealizarBarrido(False, compDef, path)
+            
+            MessageBox.Show("¡Forma irregular generada!" & vbCrLf & _
+                            "Solo contorno exterior (sin michis internos)" & vbCrLf & _
+                            "Celdas activas: " & celdasActivas & vbCrLf & _
+                            "Segmentos: " & skPath.SketchLines.Count, "Éxito - Forma Abierta")
+        End If
+    End If
+End Sub
+
+' ============================================================
+' FUNCIONES AUXILIARES (sin cambios respecto a la versión anterior)
+' ============================================================
+
+Private Function DibujarRectangulo(ByVal sk As PlanarSketch, ByVal tg As TransientGeometry, ByVal x1 As Double, ByVal z1 As Double, ByVal x2 As Double, ByVal z2 As Double) As SketchLine
+    Dim p1 As Point2d = tg.CreatePoint2d(x1, z1)
+    Dim p2 As Point2d = tg.CreatePoint2d(x2, z1)
+    Dim p3 As Point2d = tg.CreatePoint2d(x2, z2)
+    Dim p4 As Point2d = tg.CreatePoint2d(x1, z2)
+    
+    Dim ln1 As SketchLine = sk.SketchLines.AddByTwoPoints(p1, p2)
+    sk.SketchLines.AddByTwoPoints(ln1.EndSketchPoint, p3)
+    sk.SketchLines.AddByTwoPoints(p3, p4)
+    sk.SketchLines.AddByTwoPoints(p4, ln1.StartSketchPoint)
+    
+    Return ln1
+End Function
+
+Private Function DibujarContorno(ByVal sk As PlanarSketch, ByVal tg As TransientGeometry, ByVal ex0 As List(Of Integer), ByVal ez0 As List(Of Integer), ByVal ex1 As List(Of Integer), ByVal ez1 As List(Of Integer), ByVal paso_cm As Double, ByVal halfX As Double, ByVal halfZ As Double) As SketchLine
+    Dim used(ex0.Count - 1) As Boolean
+    Dim startE As Integer = 0
+    
+    Dim loopPts As New List(Of Tuple(Of Integer, Integer))()
+    Dim sx As Integer = ex0(startE)
+    Dim sz As Integer = ez0(startE)
+    Dim cx As Integer = ex1(startE)
+    Dim cz As Integer = ez1(startE)
+    used(startE) = True
+    
+    loopPts.Add(Tuple.Create(sx, sz))
+    loopPts.Add(Tuple.Create(cx, cz))
+    
+    Dim safe As Integer = 0
+    Do
+        safe += 1
+        If safe > 200000 Then Exit Do
+        If cx = sx AndAlso cz = sz Then Exit Do
+        
+        Dim nextE As Integer = FindNextEdge(ex0, ez0, ex1, ez1, used, cx, cz)
+        If nextE < 0 Then Exit Do
+        
+        used(nextE) = True
+        Dim nx As Integer, nz As Integer
+        If ex0(nextE) = cx AndAlso ez0(nextE) = cz Then
+            nx = ex1(nextE) : nz = ez1(nextE)
+        Else
+            nx = ex0(nextE) : nz = ez0(nextE)
+        End If
+        
+        loopPts.Add(Tuple.Create(nx, nz))
+        cx = nx : cz = nz
+    Loop
+    
+    Dim prevLine As SketchLine = Nothing
+    For i As Integer = 0 To loopPts.Count - 2
+        Dim a = loopPts(i)
+        Dim b = loopPts(i + 1)
+        
+        Dim pA_X As Double = (a.Item1 * paso_cm) - halfX
+        Dim pA_Z As Double = (a.Item2 * paso_cm) - halfZ
+        Dim pB_X As Double = (b.Item1 * paso_cm) - halfX
+        Dim pB_Z As Double = (b.Item2 * paso_cm) - halfZ
+        
+        Dim pA As Point2d = tg.CreatePoint2d(pA_X, pA_Z)
+        Dim pB As Point2d = tg.CreatePoint2d(pB_X, pB_Z)
+        
+        Dim ln As SketchLine
+        If i = 0 Then
+            ln = sk.SketchLines.AddByTwoPoints(pA, pB)
+        Else
+            ln = sk.SketchLines.AddByTwoPoints(prevLine.EndSketchPoint, pB)
+        End If
+        prevLine = ln
+    Next
+    
+    Return sk.SketchLines.Item(1)
+End Function
+
+Private Sub CalcularLimitesContorno(ByVal ex0 As List(Of Integer), ByVal ez0 As List(Of Integer), ByVal ex1 As List(Of Integer), ByVal ez1 As List(Of Integer), ByVal paso_cm As Double, ByVal halfX As Double, ByVal halfZ As Double, ByRef minX As Double, ByRef maxX As Double, ByRef minZ As Double, ByRef maxZ As Double)
+    minX = Double.MaxValue : maxX = Double.MinValue
+    minZ = Double.MaxValue : maxZ = Double.MinValue
+    
+    For i As Integer = 0 To ex0.Count - 1
+        Dim x0 As Double = (ex0(i) * paso_cm) - halfX
+        Dim z0 As Double = (ez0(i) * paso_cm) - halfZ
+        Dim x1 As Double = (ex1(i) * paso_cm) - halfX
+        Dim z1 As Double = (ez1(i) * paso_cm) - halfZ
+        
+        minX = Math.Min(minX, Math.Min(x0, x1))
+        maxX = Math.Max(maxX, Math.Max(x0, x1))
+        minZ = Math.Min(minZ, Math.Min(z0, z1))
+        maxZ = Math.Max(maxZ, Math.Max(z0, z1))
+    Next
+End Sub
+
+Private Function CrearLineaEnSketch(ByVal compDef As PartComponentDefinition, ByVal tg As TransientGeometry, ByVal x1 As Double, ByVal z1 As Double, ByVal x2 As Double, ByVal z2 As Double) As SketchLine
+    If Math.Abs(x2 - x1) < 0.01 AndAlso Math.Abs(z2 - z1) < 0.01 Then Return Nothing
+    
+    Dim sk As PlanarSketch = compDef.Sketches.Add(compDef.WorkPlanes.Item(2))
+    Dim ln As SketchLine = sk.SketchLines.AddByTwoPoints(tg.CreatePoint2d(x1, z1), tg.CreatePoint2d(x2, z2))
+    sk.Solve()
+    Return ln
+End Function
+
+Private Function DibujarPerfilCMarco(ByVal compDef As PartComponentDefinition, ByVal tg As TransientGeometry, ByVal xAlma As Double, ByVal rotar90 As Boolean) As PlanarSketch
+    If rotar90 Then
+        MessageBox.Show("rotar90 no soportado.", "Error")
+        Return Nothing
+    End If
+    
+    Dim h As Double = 15.24, b As Double = 4.88, tw As Double = 0.51, tf As Double = 0.87
+    Dim sk As PlanarSketch = compDef.Sketches.Add(compDef.WorkPlanes.Item(3))
+    Dim x0 As Double = xAlma
+    Dim tipx As Double = x0 - b
+    Dim innerx As Double = x0 - tw
+    Dim yb As Double = -h / 2
+    Dim yt As Double = h / 2
+    
+    DibujarPerfilPuntos(sk, tg, x0, yb, x0, yt, tipx, yt, tipx, yt - tf, innerx, yt - tf, innerx, yb + tf, tipx, yb + tf, tipx, yb)
+    
+    sk.Solve()
+    compDef.Document.Update()
+    Return sk
+End Function
+
+Private Sub DibujarPerfilPuntos(ByVal sk As PlanarSketch, ByVal tg As TransientGeometry, ByVal x1 As Double, ByVal y1 As Double, ByVal x2 As Double, ByVal y2 As Double, ByVal x3 As Double, ByVal y3 As Double, ByVal x4 As Double, ByVal y4 As Double, ByVal x5 As Double, ByVal y5 As Double, ByVal x6 As Double, ByVal y6 As Double, ByVal x7 As Double, ByVal y7 As Double, ByVal x8 As Double, ByVal y8 As Double)
+    Dim l1 = sk.SketchLines.AddByTwoPoints(tg.CreatePoint2d(x1, y1), tg.CreatePoint2d(x2, y2))
+    Dim l2 = sk.SketchLines.AddByTwoPoints(l1.EndSketchPoint, tg.CreatePoint2d(x3, y3))
+    Dim l3 = sk.SketchLines.AddByTwoPoints(l2.EndSketchPoint, tg.CreatePoint2d(x4, y4))
+    Dim l4 = sk.SketchLines.AddByTwoPoints(l3.EndSketchPoint, tg.CreatePoint2d(x5, y5))
+    Dim l5 = sk.SketchLines.AddByTwoPoints(l4.EndSketchPoint, tg.CreatePoint2d(x6, y6))
+    Dim l6 = sk.SketchLines.AddByTwoPoints(l5.EndSketchPoint, tg.CreatePoint2d(x7, y7))
+    Dim l7 = sk.SketchLines.AddByTwoPoints(l6.EndSketchPoint, tg.CreatePoint2d(x8, y8))
+    sk.SketchLines.AddByTwoPoints(l7.EndSketchPoint, l1.StartSketchPoint)
+End Sub
+
+Private Sub SweepConPerfil(ByVal compDef As PartComponentDefinition, ByVal tg As TransientGeometry, ByVal ln As SketchLine, ByVal rotar90 As Boolean)
+    If ln Is Nothing Then Exit Sub
+    
+    Dim wp As WorkPlane = compDef.WorkPlanes.AddByNormalToCurve(ln, ln.StartSketchPoint)
+    wp.Visible = False
+    
+    Dim skPerfil As PlanarSketch = compDef.Sketches.Add(wp)
+    DibujarPerfilCentrado(skPerfil, tg, rotar90)
+    
+    Dim path As Path = compDef.Features.CreatePath(ln)
+    RealizarBarrido(True, compDef, path, skPerfil)
+End Sub
+
+Private Sub DibujarPerfilCentrado(ByVal sk As PlanarSketch, ByVal tg As TransientGeometry, ByVal rotar90 As Boolean)
+    Dim h As Double = 15.24, b As Double = 4.88, tw As Double = 0.51, tf As Double = 0.87
+    
+    If rotar90 Then
+        DibujarPerfilPuntos(sk, tg, -h/2, 0, h/2, 0, h/2, -b, h/2 - tf, -b, h/2 - tf, -tw, -h/2 + tf, -tw, -h/2 + tf, -b, -h/2, -b)
+    Else
+        DibujarPerfilPuntos(sk, tg, 0, -h/2, 0, h/2, -b, h/2, -b, h/2 - tf, -tw, h/2 - tf, -tw, -h/2 + tf, -b, -h/2 + tf, -b, -h/2)
+    End If
+    sk.Solve()
+End Sub
+
+Private Sub RealizarBarrido(ByVal conPerfil As Boolean, ByVal compDef As PartComponentDefinition, ByVal path As Path, Optional ByVal skPerfil As PlanarSketch = Nothing)
+    Dim prof As Profile
+    If conPerfil Then
+        prof = skPerfil.Profiles.AddForSolid()
+    Else
+        Dim lastSk As PlanarSketch = compDef.Sketches.Item(compDef.Sketches.Count)
+        prof = lastSk.Profiles.AddForSolid()
+    End If
+    
+    Dim sweepDef As SweepDefinition = compDef.Features.SweepFeatures.CreateSweepDefinition(SweepTypeEnum.kPathSweepType, prof, path, PartFeatureOperationEnum.kJoinOperation)
+    Dim sweep As SweepFeature = compDef.Features.SweepFeatures.Add(sweepDef)
+    compDef.Document.Update()
+End Sub
+
+Sub DibujarPerfilCMask(ByVal compDef As PartComponentDefinition, ByVal tg As TransientGeometry, ByVal posicionAlmaX As Double, ByVal rotar180 As Boolean)
+    Dim h_cm As Double = 15.24, b_cm As Double = 4.88, tw_cm As Double = 0.51, tf_cm As Double = 0.87
+    Dim sf As Double = 0.1667
+    Dim delta As Double = (b_cm - tw_cm) * sf
+    Dim max_tf As Double = tf_cm + (delta / 2)
+    Dim min_tf As Double = tf_cm - (delta / 2)
+    
+    Dim skPerfil As PlanarSketch = compDef.Sketches.Add(compDef.WorkPlanes.Item(3))
+    
+    Dim x0 As Double = posicionAlmaX
+    Dim inner_x As Double = If(rotar180, x0 + tw_cm, x0 - tw_cm)
+    Dim tip_x As Double = If(rotar180, x0 + b_cm, x0 - b_cm)
+    
+    Dim y_bottom As Double = -h_cm / 2
+    Dim y_top As Double = h_cm / 2
+    Dim inner_y_top As Double = y_top - max_tf
+    Dim inner_y_bottom As Double = y_bottom + max_tf
+    Dim tip_inner_y_top As Double = y_top - min_tf
+    Dim tip_inner_y_bottom As Double = y_bottom + min_tf
+    
+    Dim p1 As Point2d = tg.CreatePoint2d(x0, y_bottom)
+    Dim p2 As Point2d = tg.CreatePoint2d(x0, y_top)
+    Dim p3 As Point2d = tg.CreatePoint2d(tip_x, y_top)
+    Dim p4 As Point2d = tg.CreatePoint2d(tip_x, tip_inner_y_top)
+    Dim p5 As Point2d = tg.CreatePoint2d(inner_x, inner_y_top)
+    Dim p6 As Point2d = tg.CreatePoint2d(inner_x, inner_y_bottom)
+    Dim p7 As Point2d = tg.CreatePoint2d(tip_x, tip_inner_y_bottom)
+    Dim p8 As Point2d = tg.CreatePoint2d(tip_x, y_bottom)
+    
+    Dim c1 = skPerfil.SketchLines.AddByTwoPoints(p1, p2)
+    Dim c2 = skPerfil.SketchLines.AddByTwoPoints(c1.EndSketchPoint, p3)
+    Dim c3 = skPerfil.SketchLines.AddByTwoPoints(c2.EndSketchPoint, p4)
+    Dim c4 = skPerfil.SketchLines.AddByTwoPoints(c3.EndSketchPoint, p5)
+    Dim c5 = skPerfil.SketchLines.AddByTwoPoints(c4.EndSketchPoint, p6)
+    Dim c6 = skPerfil.SketchLines.AddByTwoPoints(c5.EndSketchPoint, p7)
+    Dim c7 = skPerfil.SketchLines.AddByTwoPoints(c6.EndSketchPoint, p8)
+    skPerfil.SketchLines.AddByTwoPoints(c7.EndSketchPoint, c1.StartSketchPoint)
+    
+    skPerfil.Solve()
+    compDef.Document.Update()
+End Sub
+
+Function ExistsCell(ByVal mask(,) As Boolean, ByVal cols As Integer, ByVal filas As Integer, ByVal ix As Integer, ByVal iz As Integer) As Boolean
+    If ix < 0 Or ix >= cols Or iz < 0 Or iz >= filas Then Return False
+    Return mask(ix, iz)
+End Function
+
+Sub AddEdge(ByVal ex0 As List(Of Integer), ByVal ez0 As List(Of Integer), ByVal ex1 As List(Of Integer), ByVal ez1 As List(Of Integer), ByVal a As Integer, ByVal b As Integer, ByVal c As Integer, ByVal d As Integer)
+    ex0.Add(a) : ez0.Add(b) : ex1.Add(c) : ez1.Add(d)
+End Sub
+
+Function FindNextEdge(ByVal ex0 As List(Of Integer), ByVal ez0 As List(Of Integer), ByVal ex1 As List(Of Integer), ByVal ez1 As List(Of Integer), ByVal used() As Boolean, ByVal cx As Integer, ByVal cz As Integer) As Integer
+    For e As Integer = 0 To ex0.Count - 1
+        If used(e) Then Continue For
+        If (ex0(e) = cx AndAlso ez0(e) = cz) OrElse (ex1(e) = cx AndAlso ez1(e) = cz) Then Return e
+    Next
+    Return -1
+End Function
